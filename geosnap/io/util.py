@@ -265,11 +265,13 @@ def _load_acs5_variable_groups(year, cache_dir, overwrite=False):
     groups = {}
     for name, meta in variables.items():
         grp = meta.get("group")
-        if not grp:
+        if grp is None:
             continue
-        if meta.get("predicateOnly"):
+
+        grp = str(grp).strip()
+        if not grp or grp.upper() == "N/A":
             continue
-        # Include estimate, MOE, annotations, percent estimates and associated MOEs.
+                # Include estimate, MOE, annotations, percent estimates and associated MOEs.
         if not (
             name.endswith("E")
             or name.endswith("M")
@@ -479,13 +481,46 @@ def _assemble_acs5_chunks(level, year, chunk_dir, output_dir):
             merged = frame
             continue
 
-        keep = [c for c in frame.columns if c not in geom_cols or c == "geoid"]
-        merged = merged.join(frame[keep], how="outer")
+        keep = [
+            c for c in frame.columns
+            if c not in geom_cols and c not in merged.columns
+        ]
+        if keep:
+            merged = merged.join(frame[keep], how="outer")
 
     merged = merged.reset_index().rename(columns={"geoid": "GEOID"})
     out = output_dir / f"acs_demographic_profile_{year}_{level}.parquet"
     merged.to_parquet(out)
     return out
+
+def _normalize_state_fips(states):
+     """Normalize selected states to two-digit Census FIPS strings."""
+     if states is None:
+         return None
+
+     normalized = []
+     for state in states:
+         state = str(state).strip()
+
+         if not state:
+             continue
+
+         if not state.isdigit():
+             raise ValueError(
+                 "states must be Census state FIPS codes, e.g. ['06', '17', '36']"
+             )
+
+         state = state.zfill(2)
+
+         if len(state) != 2:
+             raise ValueError(
+                 "states must be two-digit Census state FIPS codes, e.g. '06'"
+             )
+
+         normalized.append(state)
+
+     return sorted(set(normalized))
+
 
 
 def convert_census_acs5(
@@ -499,7 +534,9 @@ def convert_census_acs5(
     timeout=60,
     max_retries=6,
     backoff=1.0,
+    states=None,
     state_level=False,
+    
 ):
     """Build a national ACS5 demographic profile table from ACS5 API detail tables only.
 
@@ -529,6 +566,10 @@ def convert_census_acs5(
         If True, request data at the state level instead of county level.
         This reduces API calls by ~60× but may hit Census row limits for
         large states or wide variable groups. Default is False (county level).
+    states : list-like of str or int, optional
+        Optional subset of Census state FIPS codes to download. Values are
+        normalized to two-digit strings, so 6 and "06" are equivalent.
+        If None, all states are downloaded.
 
     Returns
     -------
@@ -555,10 +596,27 @@ def convert_census_acs5(
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
     groups = _load_acs5_variable_groups(year, metadata_dir, overwrite=overwrite)
-    states = _load_states_fips()
+    
+    all_states = _load_states_fips()
+    selected_states = _normalize_state_fips(states)
 
+    if selected_states is None:
+        states_to_download = all_states
+    else:
+        invalid_states = sorted(set(selected_states) - set(all_states))
+        if invalid_states:
+            raise ValueError(
+                "Unknown state FIPS code(s): "
+                + ", ".join(invalid_states)
+            )
+
+        states_to_download = [
+            state for state in all_states if state in selected_states
+        ]
+        
     tasks = []
-    for state in states:
+    
+    for state in states_to_download:
         if state_level:
             for group in sorted(groups):
                 tid = f"{level}|{state}|{group}"
@@ -762,6 +820,10 @@ def convert_census_acs5(
                     _save_manifest()
 
     if failed:
+        print("\nFailed ACS5 chunks:")
+        for tid, err in sorted(failed.items()):
+            print(f"  {tid}: {err}")
+
         raise RuntimeError(
             f"{len(failed)} chunk downloads failed. "
             "Re-run with resume=True to retry unfinished work."

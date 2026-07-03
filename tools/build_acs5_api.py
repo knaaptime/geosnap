@@ -42,6 +42,15 @@ def parse_args():
             "Reduces API calls by ~60x but may hit Census row limits."
         ),
     )
+    parser.add_argument(
+    "--states",
+    nargs="+",
+    default=None,
+    help=(
+        "Optional list of Census state FIPS codes to download, "
+        "e.g. 11 for DC, 06 for California, 36 for New York."
+    ),
+    )
     return parser.parse_args()
 
 
@@ -67,6 +76,7 @@ def main():
                 max_retries=args.max_retries,
                 backoff=args.backoff,
                 state_level=args.state_level,
+                states=args.states
             )
             print(f"Wrote {out}")
 
